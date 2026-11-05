@@ -1,7 +1,11 @@
 import { expect, spyOn, test } from "bun:test";
-import { type CaddySite, ensureCaddySite } from "../src/caddy-admin";
+import {
+  type CaddyAdmin,
+  type CaddySite,
+  ensureCaddySite,
+} from "../src/caddy-admin";
 
-const admin = new URL("http://127.0.0.1:2019");
+const admin = { url: new URL("http://127.0.0.1:2019") };
 const serverPath = "/config/apps/http/servers";
 const etag = `"${serverPath} test"`;
 const host = "help.example.test";
@@ -37,6 +41,8 @@ test("registers the site ahead of fallback routes without replacing other Caddy 
   };
   const fetchMock = mockFetch(async (input, init) => {
     const url = new URL(String(input));
+    expect(url.origin).toBe(admin.url.origin);
+    expect(init && "unix" in init ? init.unix : undefined).toBeUndefined();
     if (init?.method !== "PATCH") {
       expect(url.pathname).toBe(serverPath);
       return Response.json(servers, { headers: { etag } });
@@ -119,6 +125,39 @@ test("uses an explicitly selected listener and reports a rejected concurrent mut
     await expect(
       ensureCaddySite(admin, site, "custom", signal),
     ).rejects.toThrow("Caddy configuration changed during site registration");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  } finally {
+    fetchMock.mockRestore();
+  }
+});
+
+test("reads and updates Caddy routes through a Unix socket", async () => {
+  const unixAdmin: CaddyAdmin = {
+    url: new URL("http://localhost"),
+    socket: "/run/caddy/admin.sock",
+  };
+  const fetchMock = mockFetch(async (input, init) => {
+    const url = new URL(String(input));
+    expect(url.origin).toBe(unixAdmin.url.origin);
+    expect(init && "unix" in init ? init.unix : undefined).toBe(
+      unixAdmin.socket,
+    );
+    expect(init?.redirect).toBe("error");
+    if (init?.method !== "PATCH") {
+      expect(url.pathname).toBe(serverPath);
+      return Response.json(
+        { https: { listen: [":443"] } },
+        { headers: { etag } },
+      );
+    }
+    expect(url.pathname).toBe(`${serverPath}/https`);
+    expect(new Headers(init.headers).get("if-match")).toBe(etag);
+    return new Response();
+  });
+  try {
+    expect(await ensureCaddySite(unixAdmin, site, undefined, signal)).toBe(
+      true,
+    );
     expect(fetchMock).toHaveBeenCalledTimes(2);
   } finally {
     fetchMock.mockRestore();

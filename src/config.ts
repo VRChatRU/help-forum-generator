@@ -1,4 +1,5 @@
 import { join, resolve } from "node:path";
+import type { CaddyAdmin } from "./caddy-admin";
 
 const root = resolve(import.meta.dir, "..");
 export const databasePath = join(root, "help-forum-generator.db");
@@ -56,16 +57,7 @@ export function discordConfig(site: ReturnType<typeof siteConfig>) {
 export function caddyConfig(site: ReturnType<typeof siteConfig>) {
   const value = env.CADDY_ADMIN_URL?.trim();
   if (!value) return;
-  const admin = httpUrl(value, "CADDY_ADMIN_URL");
-  if (
-    admin.protocol !== "http:" ||
-    !["127.0.0.1", "[::1]", "localhost"].includes(admin.hostname) ||
-    admin.pathname !== "/" ||
-    admin.search ||
-    admin.hash
-  )
-    throw new Error("CADDY_ADMIN_URL must be a local HTTP origin");
-
+  const admin = caddyAdmin(value);
   const url = new URL(site.BASE_URL ?? "https://help.vrcru.org/");
   if (url.pathname !== "/" || !/^[a-z0-9][a-z0-9.-]*$/.test(url.hostname))
     throw new Error("Caddy registration requires a site origin in BASE_URL");
@@ -76,6 +68,37 @@ export function caddyConfig(site: ReturnType<typeof siteConfig>) {
     outputDir: site.OUTPUT_DIR,
     serverName: env.CADDY_SERVER_NAME?.trim() || undefined,
   };
+}
+
+function caddyAdmin(value: string): CaddyAdmin {
+  const url = URL.parse(value);
+  const invalid =
+    "CADDY_ADMIN_URL must be a loopback HTTP origin or a unix:///absolute/socket path";
+  if (!url || url.username || url.password || url.search || url.hash)
+    throw new Error(invalid);
+
+  if (url.protocol === "unix:" && !url.host) {
+    let socket: string;
+    try {
+      socket = decodeURIComponent(url.pathname);
+    } catch {
+      throw new Error(invalid);
+    }
+    if (
+      socket.startsWith("/") &&
+      !socket.endsWith("/") &&
+      !/[\x00-\x1f\x7f]/.test(socket)
+    )
+      return { url: new URL("http://localhost"), socket };
+  }
+  if (
+    url.protocol === "http:" &&
+    ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname) &&
+    url.pathname === "/"
+  )
+    return { url };
+
+  throw new Error(invalid);
 }
 
 export type Config = ReturnType<typeof discordConfig>;

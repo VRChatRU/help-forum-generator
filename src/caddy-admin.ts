@@ -1,3 +1,5 @@
+export type CaddyAdmin = { url: URL; socket?: string };
+
 export type CaddyRoute = Record<string, unknown>;
 
 export type CaddySite = {
@@ -15,6 +17,18 @@ type CaddyServer = Record<string, unknown> & {
 const serversPath = "/config/apps/http/servers";
 const routeId = "help-forum-generator";
 const errorRouteId = "help-forum-generator-errors";
+
+export function caddyFetch(
+  admin: CaddyAdmin,
+  path: string,
+  init?: Parameters<typeof fetch>[1],
+): Promise<Response> {
+  return fetch(new URL(path, admin.url), {
+    ...init,
+    unix: admin.socket,
+    redirect: "error",
+  });
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -60,7 +74,7 @@ function siteRoute(id: string, host: string, routes: CaddyRoute[]): CaddyRoute {
 }
 
 export async function ensureCaddySite(
-  admin: URL,
+  admin: CaddyAdmin,
   site: CaddySite,
   serverName: string | undefined,
   signal: AbortSignal,
@@ -73,8 +87,7 @@ export async function ensureCaddySite(
   }
 
   const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
-  const response = await fetch(new URL(serversPath, admin), {
-    redirect: "error",
+  const response = await caddyFetch(admin, serversPath, {
     signal: requestSignal,
   });
   if (!response.ok) {
@@ -156,13 +169,13 @@ export async function ensureCaddySite(
     );
   }
 
-  const patched = await fetch(
-    new URL(`${serversPath}/${encodeURIComponent(name)}`, admin),
+  const patched = await caddyFetch(
+    admin,
+    `${serversPath}/${encodeURIComponent(name)}`,
     {
       method: "PATCH",
       headers: { "content-type": "application/json", "if-match": etag },
       body: JSON.stringify(updated),
-      redirect: "error",
       signal: requestSignal,
     },
   );

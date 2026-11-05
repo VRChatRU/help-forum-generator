@@ -1,5 +1,6 @@
 import { setTimeout as wait } from "node:timers/promises";
 import {
+  caddyFetch,
   ensureCaddySite,
   type CaddyRoute,
   type CaddySite,
@@ -38,11 +39,10 @@ async function adaptSite(
     .replaceAll("https://help.vrcru.org", () => config.url.origin)
     .replace(addressVariable, () => config.url.origin)
     .replace(rootVariable, () => root);
-  const response = await fetch(new URL("/adapt", config.admin), {
+  const response = await caddyFetch(config.admin, "/adapt", {
     method: "POST",
     headers: { "Content-Type": "text/caddyfile" },
     body,
-    redirect: "error",
     signal,
   });
   if (!response.ok) {
@@ -87,7 +87,12 @@ export async function runCaddyRegistration(
     } catch (error) {
       if (signal.aborted) return;
       if (failures++ === 0)
-        log.warn("Caddy registration failed and will be retried", { error });
+        log.warn("Caddy registration failed and will be retried", {
+          adminUrl: config.admin.socket
+            ? `unix://${config.admin.socket}`
+            : config.admin.url.origin,
+          error,
+        });
     }
     await wait(failures ? retryDelay(failures) : 30_000, undefined, {
       signal,
