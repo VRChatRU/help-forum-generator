@@ -1,7 +1,14 @@
 import { once } from "node:events";
 import { parseArgs } from "node:util";
 import { Archive, isThreadId } from "./src/archive";
-import { databasePath, discordConfig, logPath, siteConfig } from "./src/config";
+import { runCaddyRegistration } from "./src/caddy";
+import {
+  caddyConfig,
+  databasePath,
+  discordConfig,
+  logPath,
+  siteConfig,
+} from "./src/config";
 import { SiteOutput } from "./src/output";
 import { runPublication } from "./src/publication";
 import { renderSite } from "./src/render";
@@ -63,9 +70,11 @@ async function main() {
       : parseThreadReference(positionals[0]);
   const site = siteConfig();
   const config = restoreOnly ? undefined : discordConfig(site);
+  const caddy = restoreOnly ? undefined : caddyConfig(site);
   const heartbeat =
     config && runHeartbeat(config.UPTIME_KUMA_PUSH_URL, stop.signal);
   let archive: Archive | undefined;
+  let registration: Promise<void> | undefined;
 
   try {
     archive = new Archive(databasePath);
@@ -88,6 +97,7 @@ async function main() {
     });
 
     if (config && !stop.signal.aborted) {
+      if (caddy) registration = runCaddyRegistration(caddy, log, stop.signal);
       await runPublication(
         config,
         archive,
@@ -103,7 +113,7 @@ async function main() {
     }
   } finally {
     stop.abort();
-    await heartbeat;
+    await Promise.all([heartbeat, registration]);
     archive?.close();
   }
 }

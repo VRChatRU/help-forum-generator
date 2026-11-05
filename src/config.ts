@@ -53,6 +53,31 @@ export function discordConfig(site: ReturnType<typeof siteConfig>) {
   };
 }
 
+export function caddyConfig(site: ReturnType<typeof siteConfig>) {
+  const value = env.CADDY_ADMIN_URL?.trim();
+  if (!value) return;
+  const admin = httpUrl(value, "CADDY_ADMIN_URL");
+  if (
+    admin.protocol !== "http:" ||
+    !["127.0.0.1", "[::1]", "localhost"].includes(admin.hostname) ||
+    admin.pathname !== "/" ||
+    admin.search ||
+    admin.hash
+  )
+    throw new Error("CADDY_ADMIN_URL must be a local HTTP origin");
+
+  const url = new URL(site.BASE_URL ?? "https://help.vrcru.org/");
+  if (url.pathname !== "/" || !/^[a-z0-9][a-z0-9.-]*$/.test(url.hostname))
+    throw new Error("Caddy registration requires a site origin in BASE_URL");
+
+  return {
+    admin,
+    url,
+    outputDir: site.OUTPUT_DIR,
+    serverName: env.CADDY_SERVER_NAME?.trim() || undefined,
+  };
+}
+
 export type Config = ReturnType<typeof discordConfig>;
 
 function required(name: string): string {
