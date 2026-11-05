@@ -3,7 +3,6 @@ node_modules/
 /help-forum-generator.db*
 /help-forum-generator.log*
 /website/
-/help-forum-generator-data/www/
 /www/
 /dist/
 /out/
