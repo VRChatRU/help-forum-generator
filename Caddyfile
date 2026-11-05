@@ -1,0 +1,49 @@
+{$HELP_SITE_ADDRESS:help.vrcru.org} {
+	root "{$HELP_WEB_ROOT:./website}"
+	encode zstd gzip
+
+	@asset path_regexp (?i)\.(?:ico|webp|jpe?g|png|svg|gif|js|mp4|webm|wav)$
+	header @asset Cache-Control "public, max-age=31536000, immutable" {
+		match status 200 206 304
+	}
+	header /assets/style.css Cache-Control "no-cache" {
+		match status 200 206 304
+	}
+	@binary path_regexp ^/assets/[0-9]{1,20}/[a-f0-9]{64}\.bin$
+	header @binary {
+		Content-Type application/octet-stream
+		X-Content-Type-Options nosniff
+		match status 200 206
+	}
+	@download vars_regexp {uri} ^/assets/[0-9]{1,20}/[a-f0-9]{64}\.[a-z0-9]+\?download=((?:[A-Za-z0-9._~-]|%[A-Fa-f0-9]{2})+)$
+	header @download {
+		Content-Disposition "attachment; filename*=UTF-8''{re.download.1}"
+		Content-Type application/octet-stream
+		X-Content-Type-Options nosniff
+		match status 200 206
+	}
+
+	handle @asset {
+		file_server
+	}
+
+	handle {
+		# Keep the public URLs and redirect order from Nginx.
+		@trailing vars_regexp {uri} ^(/[^?]+?)/+(?:\?.*)?$
+		@index path_regexp ^/index(?:\.html)?$
+		@html vars_regexp {uri} ^(/[^?]+)\.html(?:\?.*)?$
+		route {
+			redir @trailing https://help.vrcru.org{re.trailing.1}{?query} 301
+			redir @index https://help.vrcru.org/ 301
+			redir @html https://help.vrcru.org{re.html.1}{?query} 301
+			try_files {path} {path}.html {path}/index.html
+			file_server {
+				disable_canonical_uris
+			}
+		}
+	}
+
+	handle_errors 403 404 {
+		redir https://vrcru.org/404.html 302
+	}
+}

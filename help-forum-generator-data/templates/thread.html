@@ -3,8 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' https:; media-src 'self' https:; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'none'">
   <title>{{title}} - {{site_title}}</title>
   {{description_tag}}
+  {{canonical_tag}}
   {{meta_extra}}
   <link rel="icon" href="https://vrcru.org/favicon.ico" sizes="any">
   <link rel="stylesheet" href="{{style_href}}">
@@ -12,7 +14,7 @@
 <body>
   <header class="site-header">
     <div class="site-header__inner">
-      <a href="/" class="site-header__brand">
+      <a href="../../" class="site-header__brand">
         <img src="https://vrcru.org/static/logo.svg" alt="VRChatRU logo" width="24" height="24">
         <span>{{site_title}}</span>
       </a>

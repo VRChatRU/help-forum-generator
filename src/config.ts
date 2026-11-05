@@ -1,44 +1,75 @@
-import type { EnvConfig } from './types';
+import { join, resolve } from "node:path";
 
-export const TEMPLATES_DIR = "templates";
-export const DEFAULT_AUTHOR_COLOR = "#8b949e";
-export const GROUP_WINDOW_MS = 10 * 60 * 1000;
+const root = resolve(import.meta.dir, "..");
+export const databasePath = join(root, "help-forum-generator.db");
+export const logPath = join(root, "help-forum-generator.log");
 
-export function hasArg(name: string): boolean {
-  return process.argv.includes(name);
-}
+const env = Bun.env;
 
-function parseIdList(value: string): string[] {
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function requireEnv(name: string, fallback?: string): string {
-  const value = process.env[name] ?? fallback;
-  if (!value) {
-    throw new Error(`Missing required env var: ${name}`);
+export function siteConfig() {
+  const baseUrl = env.BASE_URL?.trim()
+    ? httpUrl(env.BASE_URL, "BASE_URL")
+    : undefined;
+  if (baseUrl) {
+    baseUrl.pathname = `${baseUrl.pathname.replace(/\/+$/, "")}/`;
+    baseUrl.search = "";
+    baseUrl.hash = "";
   }
+
+  return {
+    OUTPUT_DIR: resolve(root, env.OUTPUT_DIR?.trim() || "website"),
+    LEGACY_OUTPUT_DIR: env.LEGACY_OUTPUT_DIR?.trim() || undefined,
+    GUILD_ID: env.GUILD_ID?.trim() || "666306330230915093",
+    FORUM_CHANNEL_ID: env.FORUM_CHANNEL_ID?.trim() || "1019662051825680404",
+    PUBLISH_EMOJI: env.PUBLISH_EMOJI?.trim() || "🌐",
+    ANSWER_EMOJI: env.ANSWER_EMOJI?.trim() || "✅",
+    SITE_TITLE: env.SITE_TITLE?.trim() || "База знаний VRChatRU",
+    SITE_DESCRIPTION:
+      env.SITE_DESCRIPTION?.trim() ||
+      "Помощь по VRChat, ответы на частые вопросы, ошибки, советы и гайды из форума VRChatRU",
+    BASE_URL: baseUrl?.href,
+  };
+}
+
+export function discordConfig(site: ReturnType<typeof siteConfig>) {
+  const roles = required("PUBLISHER_ROLE_ID")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  if (roles.length === 0)
+    throw new Error("Set at least one publisher role in PUBLISHER_ROLE_ID");
+
+  return {
+    ...site,
+    BOT_TOKEN: required("BOT_TOKEN"),
+    GUILD_ID: required("GUILD_ID"),
+    FORUM_CHANNEL_ID: required("FORUM_CHANNEL_ID"),
+    PUBLISHER_ROLE_IDS: [...new Set(roles)],
+    LOG_CHANNEL_ID: env.LOG_CHANNEL_ID?.trim() || undefined,
+    UPTIME_KUMA_PUSH_URL: httpUrl(
+      required("UPTIME_KUMA_PUSH_URL"),
+      "UPTIME_KUMA_PUSH_URL",
+    ),
+  };
+}
+
+export type Config = ReturnType<typeof discordConfig>;
+
+function required(name: string): string {
+  const value = env[name]?.trim();
+  if (!value) throw new Error(`Set ${name} in .env`);
   return value;
 }
 
-export function getConfig(): EnvConfig {
-  const publisherRoleIds = parseIdList(requireEnv("PUBLISHER_ROLE_ID"));
-  if (publisherRoleIds.length === 0) {
-    throw new Error("Missing required env var: PUBLISHER_ROLE_ID");
+function httpUrl(value: string, name: string): URL {
+  const url = URL.canParse(value) ? new URL(value) : null;
+  if (
+    !url ||
+    !["http:", "https:"].includes(url.protocol) ||
+    url.username ||
+    url.password
+  ) {
+    throw new Error(`Set a valid HTTP(S) URL in ${name}`);
   }
-  return {
-    BOT_TOKEN: requireEnv("BOT_TOKEN"),
-    GUILD_ID: requireEnv("GUILD_ID"),
-    FORUM_CHANNEL_ID: requireEnv("FORUM_CHANNEL_ID"),
-    PUBLISHER_ROLE_IDS: publisherRoleIds,
-    OUTPUT_DIR: requireEnv("OUTPUT_DIR"),
-    BASE_URL: process.env.BASE_URL,
-    PUBLISH_EMOJI: requireEnv("PUBLISH_EMOJI"),
-    ANSWER_EMOJI: requireEnv("ANSWER_EMOJI"),
-    SITE_TITLE: requireEnv("SITE_TITLE"),
-    SITE_DESCRIPTION: requireEnv("SITE_DESCRIPTION"),
-    LOG_CHANNEL_ID: process.env.LOG_CHANNEL_ID,
-  };
+  return url;
 }

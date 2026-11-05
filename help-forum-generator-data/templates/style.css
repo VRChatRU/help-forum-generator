@@ -12,10 +12,7 @@
 * { box-sizing: border-box; }
 body {
   margin: 0;
-  background:
-    radial-gradient(1400px 900px at 50% -25%, rgba(13, 138, 255, 0.26) 0%, rgba(11, 14, 19, 0) 65%),
-    radial-gradient(1000px 800px at 50% 20%, rgba(6, 92, 172, 0.18) 0%, rgba(11, 14, 19, 0) 60%),
-    linear-gradient(180deg, #0b0e13 0%, #0a0d12 100%);
+  background: linear-gradient(180deg, #0b0e13 0%, #0a0d12 100%);
   color: var(--text);
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   line-height: 1.55;
@@ -224,6 +221,29 @@ time { display: block; color: var(--muted); font-size: 0.85rem; margin-top: 4px;
   text-overflow: ellipsis;
   vertical-align: bottom;
 }
+
+.attachment {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.attachment__file { min-width: 0; }
+.attachment__file small { display: block; color: var(--muted); }
+.body .attachment__action {
+  flex: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--bg);
+}
+.body .attachment__action:hover { background: #43a3ff; }
+.body .attachment__action:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
 
 .body code {
   font-family: Consolas, Monaco, monospace;
