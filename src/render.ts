@@ -47,7 +47,7 @@ const DATE_FORMAT = new Intl.DateTimeFormat("ru-RU", {
   dateStyle: "short",
   timeStyle: "short",
 });
-const TEMPLATES = new URL("../website-data/", import.meta.url);
+const TEMPLATES = new URL("../templates/", import.meta.url);
 let templateFiles: Promise<[string, string, string]> | undefined;
 
 function templates() {
