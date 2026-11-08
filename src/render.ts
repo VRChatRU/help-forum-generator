@@ -1,11 +1,17 @@
 import {
   ChannelType,
+  escapeMarkdown,
   type GuildMember,
   type Message,
   type ThreadChannel,
   type User,
 } from "discord.js";
-import type { Page, PageMeta } from "./archive.ts";
+import type {
+  ArchivedMessage,
+  Page,
+  PageMeta,
+  ThreadSnapshot,
+} from "./model.ts";
 import {
   assetUrl,
   mediaFile,
@@ -19,6 +25,7 @@ import {
   externalLink,
   image,
   renderMarkdown,
+  renderTextMarkdown,
   shortText,
 } from "./render/markdown.ts";
 
@@ -35,7 +42,7 @@ export type RenderConfig = {
 type Profile = {
   name: string;
   color: string;
-  avatar: string;
+  avatar: string | null;
   roleIcon: string | null;
 };
 
@@ -192,12 +199,20 @@ async function loadProfile(
   };
 }
 
-type Source = {
-  message: Message;
+type DisplaySource = {
+  id: string;
+  authorId: string;
+  createdAt: Date;
   profile: Profile;
-  mention(syntax: string): string;
   excerpt(limit: number): string;
 };
+
+type Source = DisplaySource & {
+  mention(syntax: string): string;
+  text(content: string): string;
+};
+
+type MessageGroup = { source: DisplaySource; last: number; messages: string[] };
 
 async function sourceMessage(
   message: Message,
@@ -232,43 +247,58 @@ async function sourceMessage(
     return { name: "<" + syntax + ">", color: DEFAULT_COLOR };
   }
 
+  function resolveContent(content: string, markdown: boolean): string {
+    return content
+      .replace(/<(@!?[0-9]+|@&[0-9]+|#[0-9]+)>/g, (_, syntax: string) => {
+        const name = display(syntax).name;
+        return markdown ? escapeMarkdown(name) : name;
+      })
+      .replace(/<a?:([a-z0-9_]+):[0-9]+>/gi, ":$1:")
+      .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");
+  }
+
   return {
-    message,
+    id: message.id,
+    authorId: message.author.id,
+    createdAt: message.createdAt,
     profile,
     mention(syntax) {
       const value = display(syntax);
       return `<span class="mention" style="color: ${value.color}">${escape(value.name)}</span>`;
     },
+    text(content) {
+      return resolveContent(content, true);
+    },
     excerpt(limit) {
-      return shortText(
-        message.content.replace(
-          /<(@!?[0-9]+|@&[0-9]+|#[0-9]+)>/g,
-          (_, syntax: string) => display(syntax).name,
-        ),
-        limit,
-      );
+      return shortText(resolveContent(message.content, false), limit);
     },
   };
 }
 
-async function renderTags(
-  thread: ThreadChannel,
-  assets: ThreadAssets,
-): Promise<string> {
-  if (!thread.appliedTags.length || !thread.parentId) return "";
+async function loadTags(thread: ThreadChannel) {
+  if (!thread.appliedTags.length || !thread.parentId) return [];
   const parent =
     thread.parent ?? (await thread.guild.channels.fetch(thread.parentId));
   if (
     parent?.type !== ChannelType.GuildForum &&
     parent?.type !== ChannelType.GuildMedia
   )
-    return "";
+    return [];
 
   const byId = new Map(parent.availableTags.map((tag) => [tag.id, tag]));
-  const tags = await Promise.all(
-    thread.appliedTags.map(async (id) => {
-      const tag = byId.get(id);
-      if (!tag) return "";
+  return thread.appliedTags.flatMap((id) => {
+    const tag = byId.get(id);
+    return tag ? [tag] : [];
+  });
+}
+
+async function renderTags(
+  thread: ThreadChannel,
+  tags: Awaited<ReturnType<typeof loadTags>>,
+  assets: ThreadAssets,
+): Promise<string> {
+  const rendered = await Promise.all(
+    tags.map(async (tag) => {
       const emoji = tag.emoji;
       const icon = emoji?.id
         ? await customEmoji(
@@ -284,7 +314,9 @@ async function renderTags(
       return `<span class="tag">${icon}${escape(tag.name)}</span>`;
     }),
   );
-  return tags.some(Boolean) ? `<div class="tags">${tags.join("")}</div>` : "";
+  return rendered.some(Boolean)
+    ? `<div class="tags">${rendered.join("")}</div>`
+    : "";
 }
 
 async function renderReactions(
@@ -394,24 +426,28 @@ async function renderMedia(
   return Promise.all([...attachments, ...previews]);
 }
 
-function renderReply(source: Source | undefined): string {
+function renderReply(source: DisplaySource | undefined): string {
   if (!source) return "";
   const text = source.excerpt(80);
   return `<div class="reply">
-  <span>Ответ на <a href="#m-${escape(source.message.id)}" style="color: ${source.profile.color}">${escape(source.profile.name)}</a></span>
+  <span>Ответ на <a href="#m-${escape(source.id)}" style="color: ${source.profile.color}">${escape(source.profile.name)}</a></span>
   ${text ? `<p>${escape(text)}</p>` : ""}
 </div>`;
 }
 
 async function renderGroup(
-  source: Source,
+  source: DisplaySource,
   messages: string[],
-  assets: ThreadAssets,
+  assets?: ThreadAssets,
 ): Promise<string> {
-  const { message, profile } = source;
+  const { createdAt, profile } = source;
   const [avatar, role] = await Promise.all([
-    assets.localize(profile.avatar, "avatars", "png"),
-    profile.roleIcon && assets.localize(profile.roleIcon, "roles", "png"),
+    assets &&
+      profile.avatar &&
+      assets.localize(profile.avatar, "avatars", "png"),
+    assets &&
+      profile.roleIcon &&
+      assets.localize(profile.roleIcon, "roles", "png"),
   ]);
   return `<article class="group">
   <header>
@@ -422,13 +458,119 @@ async function renderGroup(
           ? `<img class="role-icon" src="${escape(assetUrl(role))}" alt="" width="18" height="18" loading="lazy" decoding="async">`
           : ""
       }</h3>
-      <time datetime="${message.createdAt.toISOString()}">${escape(DATE_FORMAT.format(message.createdAt))}</time>
+      <time datetime="${createdAt.toISOString()}">${escape(DATE_FORMAT.format(createdAt))}</time>
     </div>
   </header>
   <section>
 ${messages.join("\n")}
   </section>
 </article>`;
+}
+
+function renderMessage(
+  id: string,
+  body: string,
+  answer: boolean,
+  reactions: string,
+): string {
+  return `<div id="m-${escape(id)}" class="message" data-answer="${answer}">
+  <div class="meta">${answer ? '<span class="badge">Ответ</span>' : ""}</div>
+  <div class="body">${body}</div>
+  ${reactions}
+</div>`;
+}
+
+function appendMessage(
+  groups: MessageGroup[],
+  source: DisplaySource,
+  html: string,
+): void {
+  const group = groups.at(-1);
+  const timestamp = source.createdAt.getTime();
+  if (
+    group?.source.authorId === source.authorId &&
+    (source.authorId || group.source.profile.name === source.profile.name) &&
+    timestamp - group.last <= GROUP_INTERVAL
+  ) {
+    group.messages.push(html);
+    group.last = timestamp;
+  } else {
+    groups.push({ source, last: timestamp, messages: [html] });
+  }
+}
+
+async function threadPage(
+  snapshot: ThreadSnapshot,
+  config: RenderConfig,
+  groups: MessageGroup[],
+  tagsHtml: string,
+  assets?: ThreadAssets,
+  firstImage?: string,
+): Promise<Page> {
+  const [, template] = await templates();
+  const renderedGroups: string[] = [];
+  for (const group of groups) {
+    renderedGroups.push(
+      await renderGroup(group.source, group.messages, assets),
+    );
+  }
+  const answers = snapshot.messages
+    .filter((message) => message.answer)
+    .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  if (answers.length) {
+    const links = answers.map(
+      (message, index) =>
+        `<a href="#m-${escape(message.id)}">Ответ ${index + 1}</a>`,
+    );
+    renderedGroups.splice(
+      1,
+      0,
+      `<nav class="answers-nav"><span>Ответы:</span>${links.join("")}</nav>`,
+    );
+  }
+
+  const base = baseUrl(config);
+  const canonical = base && new URL(`threads/${snapshot.threadId}/`, base);
+  const description =
+    `${snapshot.excerpt} (VRChat, врчат, вр чат, vr, вр)`.trim();
+  const html = fill(template, {
+    title: escape(snapshot.title),
+    thread_title: escape(snapshot.title),
+    site_title: escape(config.SITE_TITLE),
+    thread_tags: tagsHtml,
+    discord_url: `https://discord.com/channels/${escape(config.GUILD_ID)}/${escape(snapshot.threadId)}`,
+    discord_button_text: "Открыть в Discord",
+    messages: renderedGroups.join("\n"),
+    updated_at: escape(DATE_FORMAT.format(new Date())),
+    style_href: "../../assets/style.css",
+    ...seo(
+      snapshot.title,
+      description,
+      canonical,
+      base && firstImage ? new URL(firstImage, base) : undefined,
+    ),
+  });
+  return {
+    threadId: snapshot.threadId,
+    title: snapshot.title,
+    createdAt: snapshot.createdAt,
+    excerpt: snapshot.excerpt,
+    html,
+    assetPaths: assets ? [...assets.paths] : [],
+  };
+}
+
+function textualEmbeds(message: Message): string {
+  return message.embeds
+    .flatMap((embed) => [
+      embed.author?.name,
+      embed.title,
+      embed.description,
+      ...(embed.fields ?? []).flatMap((field) => [field.name, field.value]),
+      embed.footer?.text,
+    ])
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 export async function renderThread(
@@ -438,20 +580,17 @@ export async function renderThread(
   storage: RenderAssets,
   isAnswer: (message: Message) => Promise<boolean>,
   signal?: AbortSignal,
-): Promise<Page> {
+  onSnapshot?: (snapshot: ThreadSnapshot) => void,
+): Promise<Page & { snapshot: ThreadSnapshot }> {
   const ordered = [...messages].sort(
     (a, b) => a.createdTimestamp - b.createdTimestamp,
   );
   if (ordered[0]?.id !== thread.id)
     throw new Error("The thread starter message is missing");
-  const [, template] = await templates();
-  const assets = new ThreadAssets(storage, signal);
   const profiles = new Map<string, Promise<Profile>>();
   const sources = new Map<string, Source>();
-  const groups: Array<{ source: Source; last: number; messages: string[] }> =
-    [];
-  const answerIds: string[] = [];
-  let firstImage: string | undefined;
+  const archivedMessages: ArchivedMessage[] = [];
+  const tags = await loadTags(thread);
 
   function getProfile(user: User, member?: GuildMember | null) {
     let profile = profiles.get(user.id);
@@ -466,6 +605,54 @@ export async function renderThread(
     signal?.throwIfAborted();
     const source = await sourceMessage(message, getProfile);
     sources.set(message.id, source);
+    const content = [message.content, textualEmbeds(message)]
+      .filter(Boolean)
+      .map((text) => source.text(text))
+      .join("\n\n");
+    const control = new Set([config.PUBLISH_EMOJI, config.ANSWER_EMOJI]);
+    const reactions = [...message.reactions.cache.values()]
+      .filter(
+        ({ emoji, count }) =>
+          count > 0 &&
+          !control.has(emoji.id ?? "") &&
+          !control.has(emoji.name ?? ""),
+      )
+      .map(({ emoji, count }) => ({
+        name: emoji.id ? `:${emoji.name ?? "emoji"}:` : (emoji.name ?? ""),
+        count,
+      }))
+      .filter(({ name }) => Boolean(name));
+    archivedMessages.push({
+      id: message.id,
+      authorId: message.author.id,
+      authorName: source.profile.name,
+      authorColor: source.profile.color,
+      createdAt: message.createdAt.toISOString(),
+      content,
+      replyTo: message.reference?.messageId ?? null,
+      answer: await isAnswer(message),
+      reactions,
+    });
+  }
+
+  const snapshot: ThreadSnapshot = {
+    threadId: thread.id,
+    title: thread.name,
+    createdAt: (thread.createdAt ?? ordered[0]!.createdAt).toISOString(),
+    excerpt: sources.get(thread.id)!.excerpt(180),
+    tags: tags.map((tag) => tag.name),
+    messages: archivedMessages,
+  };
+  onSnapshot?.(snapshot);
+  signal?.throwIfAborted();
+
+  const assets = new ThreadAssets(storage, signal);
+  const groups: MessageGroup[] = [];
+  let firstImage: string | undefined;
+  for (const [index, message] of ordered.entries()) {
+    signal?.throwIfAborted();
+    const source = sources.get(message.id)!;
+    const archived = archivedMessages[index]!;
     const proxies = new Map<string, string>();
     for (const embed of message.embeds) {
       const preview = embed.image ?? embed.thumbnail;
@@ -473,7 +660,7 @@ export async function renderThread(
       if (preview && url)
         proxies.set(url.href, preview.proxyURL ?? preview.url);
     }
-    const [markdown, media, reactions, answer] = await Promise.all([
+    const [markdown, media, reactions] = await Promise.all([
       renderMarkdown(
         message.content,
         thread.id,
@@ -483,80 +670,86 @@ export async function renderThread(
       ),
       renderMedia(message, assets, proxies),
       renderReactions(message, config, assets),
-      isAnswer(message),
     ]);
     firstImage ??=
       markdown.images[0] ?? media.find((item) => item.ogImage)?.ogImage;
-    if (answer) answerIds.push(message.id);
 
-    const reference = message.reference?.messageId;
-    const reply = renderReply(reference ? sources.get(reference) : undefined);
+    const reply = renderReply(
+      archived.replyTo ? sources.get(archived.replyTo) : undefined,
+    );
     const body = [reply, markdown.html, ...media.map((item) => item.html)]
       .filter(Boolean)
       .join("\n");
-    const html = `<div id="m-${escape(message.id)}" class="message" data-answer="${answer}">
-  <div class="meta">${answer ? '<span class="badge">Ответ</span>' : ""}</div>
-  <div class="body">${body}</div>
-  ${reactions}
-</div>`;
-    const group = groups.at(-1);
-    if (
-      group?.source.message.author.id === message.author.id &&
-      message.createdTimestamp - group.last <= GROUP_INTERVAL
-    ) {
-      group.messages.push(html);
-      group.last = message.createdTimestamp;
-    } else {
-      groups.push({ source, last: message.createdTimestamp, messages: [html] });
-    }
-  }
-
-  const renderedGroups: string[] = [];
-  for (const group of groups) {
-    signal?.throwIfAborted();
-    renderedGroups.push(
-      await renderGroup(group.source, group.messages, assets),
-    );
-  }
-  if (answerIds.length) {
-    const links = answerIds.map(
-      (id, index) => `<a href="#m-${escape(id)}">Ответ ${index + 1}</a>`,
-    );
-    renderedGroups.splice(
-      1,
-      0,
-      `<nav class="answers-nav"><span>Ответы:</span>${links.join("")}</nav>`,
+    appendMessage(
+      groups,
+      source,
+      renderMessage(message.id, body, archived.answer, reactions),
     );
   }
 
-  const excerpt = sources.get(thread.id)!.excerpt(180);
-  const createdAt = (thread.createdAt ?? ordered[0]!.createdAt).toISOString();
-  const base = baseUrl(config);
-  const canonical = base && new URL(`threads/${thread.id}/`, base);
-  const description = `${excerpt} (VRChat, врчат, вр чат, vr, вр)`.trim();
-  const html = fill(template, {
-    title: escape(thread.name),
-    thread_title: escape(thread.name),
-    site_title: escape(config.SITE_TITLE),
-    thread_tags: await renderTags(thread, assets),
-    discord_url: escape(thread.url),
-    discord_button_text: "Открыть в Discord",
-    messages: renderedGroups.join("\n"),
-    updated_at: escape(DATE_FORMAT.format(new Date())),
-    style_href: "../../assets/style.css",
-    ...seo(
-      thread.name,
-      description,
-      canonical,
-      base && firstImage ? new URL(firstImage, base) : undefined,
-    ),
-  });
-  return {
-    threadId: thread.id,
-    title: thread.name,
-    createdAt,
-    excerpt,
-    html,
-    assetPaths: [...assets.paths],
-  };
+  const page = await threadPage(
+    snapshot,
+    config,
+    groups,
+    await renderTags(thread, tags, assets),
+    assets,
+    firstImage,
+  );
+  return { ...page, snapshot };
+}
+
+export async function renderArchivedThread(
+  snapshot: ThreadSnapshot,
+  config: RenderConfig,
+): Promise<Page> {
+  const sources = new Map<string, DisplaySource>();
+  const ordered = [...snapshot.messages].sort(
+    (a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt),
+  );
+  for (const message of ordered) {
+    sources.set(message.id, {
+      id: message.id,
+      authorId: message.authorId,
+      createdAt: new Date(message.createdAt),
+      profile: {
+        name: message.authorName,
+        color: color(message.authorColor),
+        avatar: null,
+        roleIcon: null,
+      },
+      excerpt: (limit) => shortText(message.content, limit),
+    });
+  }
+
+  const groups: MessageGroup[] = [];
+  for (const message of ordered) {
+    const source = sources.get(message.id)!;
+    const reply = renderReply(
+      message.replyTo ? sources.get(message.replyTo) : undefined,
+    );
+    const markdown = await renderTextMarkdown(message.content);
+    const body = [reply, markdown].filter(Boolean).join("\n");
+    const badges = message.reactions
+      .filter((reaction) => reaction.count > 0)
+      .map(
+        (reaction) =>
+          `<span class="reaction"><span class="emoji">${escape(reaction.name)}</span><em>${reaction.count}</em></span>`,
+      )
+      .join("");
+    const reactions = badges ? `<div class="reactions">${badges}</div>` : "";
+    appendMessage(
+      groups,
+      source,
+      renderMessage(message.id, body, message.answer, reactions),
+    );
+  }
+  const tags = snapshot.tags
+    .map((tag) => `<span class="tag">${escape(tag)}</span>`)
+    .join("");
+  return threadPage(
+    snapshot,
+    config,
+    groups,
+    tags ? `<div class="tags">${tags}</div>` : "",
+  );
 }

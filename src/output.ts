@@ -1,7 +1,9 @@
 import { mkdir, readdir, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { isAssetPath, isThreadId } from "./archive";
-import type { Archive, Asset, Page, PageMeta } from "./archive";
+import type { Archive, Page, PageMeta } from "./archive";
+import { legacySnapshot } from "./legacy";
+import { renderArchivedThread, type RenderConfig } from "./render";
 
 export type SiteFiles = {
   index: string;
@@ -79,30 +81,6 @@ function decodeAttribute(value: string): string {
   );
 }
 
-function legacyAssetPaths(html: string, threadId: string): Set<string> {
-  const paths = new Set<string>();
-  const base = new URL(`https://legacy.invalid/threads/${threadId}/index.html`);
-  new HTMLRewriter()
-    .on("[src], [poster], a[href]", {
-      element(element) {
-        for (const attribute of ["src", "poster", "href"]) {
-          const raw = element.getAttribute(attribute);
-          if (!raw || !/^(?:\.\.\/\.\.\/|\/)assets\//.test(raw)) continue;
-          try {
-            const url = new URL(decodeAttribute(raw), base);
-            const path = decodeURIComponent(url.pathname.slice(1));
-            if (url.origin === base.origin && isAssetPath(path))
-              paths.add(path);
-          } catch {
-            // A malformed legacy URL cannot refer to a local generated asset.
-          }
-        }
-      },
-    })
-    .transform(html);
-  return paths;
-}
-
 const archivedDownload =
   /^(?:\.\.\/\.\.\/|\/)assets\/\d{1,20}\/[a-f0-9]{64}\.[a-z0-9]+$/;
 
@@ -157,66 +135,53 @@ export class SiteOutput {
       )
         continue;
       const dir = join(threads, threadId);
-      let page: Page;
-      const assets: Asset[] = [];
       try {
         const meta = legacyMeta(
           await Bun.file(join(dir, "meta.json")).json(),
           threadId,
         );
         const html = await Bun.file(join(dir, "index.html")).text();
-        const assetPaths = [];
-        for (const path of legacyAssetPaths(html, threadId)) {
-          if (!this.archive.hasAsset(path)) {
-            try {
-              assets.push({
-                path,
-                bytes: await Bun.file(join(root, path)).bytes(),
-              });
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== "ENOENT")
-                throw error;
-              onIssue?.(`Missing asset for legacy page ${threadId}: ${path}`);
-              continue;
-            }
-          }
-          assetPaths.push(path);
-        }
-        page = { ...meta, html, assetPaths };
+        this.archive.save(legacySnapshot(meta, html));
       } catch (error) {
         onIssue?.(`Could not read legacy page ${threadId}`, error);
         continue;
       }
-      this.archive.save(page, assets);
       imported++;
     }
     return imported;
   }
 
-  async restore(): Promise<number> {
+  async restore(
+    config: RenderConfig,
+    preserveExisting = false,
+  ): Promise<number> {
     for (const threadId of this.archive.listUnpublished())
       await this.removePage(threadId);
     const published = this.archive.list();
-    const writtenAssets = new Set<string>();
     for (const { threadId } of published) {
-      const page = this.archive.get(threadId);
-      if (page?.published) await this.writePage(page, writtenAssets);
+      const thread = this.archive.get(threadId);
+      if (!thread?.published) continue;
+      if (
+        preserveExisting &&
+        !thread.sourceMissing &&
+        (await Bun.file(join(this.threadDir(threadId), "index.html")).exists())
+      )
+        continue;
+      await this.writePage(await renderArchivedThread(thread, config));
     }
     return published.length;
   }
 
-  async writePage(
-    page: Page,
-    writtenAssets = new Set<string>(),
-  ): Promise<void> {
+  async hasAsset(path: string): Promise<boolean> {
+    return Bun.file(this.assetFile(path)).exists();
+  }
+
+  async writeAsset(path: string, bytes: Uint8Array): Promise<void> {
+    await writeAtomic(this.assetFile(path), bytes);
+  }
+
+  async writePage(page: Page): Promise<void> {
     const dir = this.threadDir(page.threadId);
-    for (const path of page.assetPaths) {
-      if (writtenAssets.has(path)) continue;
-      const bytes = this.archive.getAsset(path);
-      if (!bytes) throw new Error(`Missing archived asset: ${path}`);
-      await writeAtomic(this.assetFile(path), bytes);
-      writtenAssets.add(path);
-    }
 
     const { threadId, title, createdAt, excerpt, html } = page;
     const pageRelPath = `threads/${threadId}/index.html`;
@@ -229,7 +194,7 @@ export class SiteOutput {
       ),
     );
     await writeAtomic(join(dir, "index.html"), nameDownloads(html));
-    await this.removeUnlistedAssets(threadId);
+    await this.removeUnlistedAssets(threadId, new Set(page.assetPaths));
   }
 
   async removePage(threadId: string): Promise<void> {
@@ -250,9 +215,23 @@ export class SiteOutput {
     await writeAtomic(join(this.root, "index.html"), files.index);
   }
 
-  private async removeUnlistedAssets(threadId: string): Promise<void> {
-    for (const path of this.archive.unlistedThreadAssets(threadId)) {
-      await rm(this.assetFile(path), { force: true });
+  private async removeUnlistedAssets(
+    threadId: string,
+    keep = new Set<string>(),
+  ): Promise<void> {
+    const dir = join(this.root, "assets", threadId);
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !/^[a-f0-9]{64}\.[a-z0-9]+$/.test(entry.name))
+        continue;
+      const path = `assets/${threadId}/${entry.name}`;
+      if (!keep.has(path)) await rm(this.assetFile(path), { force: true });
     }
   }
 

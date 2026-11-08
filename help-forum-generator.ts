@@ -78,6 +78,11 @@ async function main() {
 
   try {
     archive = new Archive(databasePath);
+    if (archive.migration)
+      log.info(
+        "Migrated SQLite archive to thread and message text",
+        archive.migration,
+      );
     const output = new SiteOutput(site.OUTPUT_DIR, archive);
     const onIssue = (message: string, error?: unknown) =>
       log.warn(message, { error });
@@ -89,7 +94,7 @@ async function main() {
     if (imported)
       log.info("Imported existing pages into SQLite", { pages: imported });
 
-    const restored = await output.restore();
+    const restored = await output.restore(site, !restoreOnly);
     await output.writeSite(await renderSite(archive.list(), site));
     log.info("Restored the site from SQLite", {
       pages: restored,

@@ -1,6 +1,6 @@
 export type RenderAssets = {
-  get(path: string): boolean;
-  add(path: string, bytes: Uint8Array): void;
+  get(path: string): boolean | Promise<boolean>;
+  add(path: string, bytes: Uint8Array): void | Promise<void>;
 };
 
 const DISCORD_MEDIA = new Set([
@@ -110,7 +110,7 @@ export class ThreadAssets {
   }
 
   private async resolve(url: URL, path: string): Promise<string | null> {
-    if (!this.storage.get(path)) {
+    if (!(await this.storage.get(path))) {
       let bytes: Uint8Array | null;
       try {
         bytes = await this.load(url);
@@ -125,7 +125,7 @@ export class ThreadAssets {
         );
       }
       if (!bytes) return null;
-      this.storage.add(path, bytes);
+      await this.storage.add(path, bytes);
     }
     this.paths.add(path);
     return path;

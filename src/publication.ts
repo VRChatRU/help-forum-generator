@@ -8,9 +8,12 @@ import {
   type ForumChannel,
   type GatewayMessageReactionAddDispatchData,
   type GatewayMessageReactionRemoveDispatchData,
+  type GatewayMessageDeleteDispatchData,
+  type GatewayMessageDeleteBulkDispatchData,
+  type GatewayThreadDeleteDispatchData,
   type ThreadChannel,
 } from "discord.js";
-import type { Archive } from "./archive";
+import type { Archive, Page } from "./archive";
 import type { Config } from "./config";
 import {
   createDiscord,
@@ -24,7 +27,7 @@ import {
   matchesEmoji,
 } from "./discord";
 import type { SiteOutput } from "./output";
-import { renderSite, renderThread } from "./render";
+import { renderArchivedThread, renderSite, renderThread } from "./render";
 import { retryDelay, WorkQueue, type Logger } from "./runtime";
 
 const priority = { output: 0, reaction: 1, setup: 2, backfill: 3, batch: 4 };
@@ -44,8 +47,9 @@ export async function runPublication(
   signal: AbortSignal,
 ): Promise<void> {
   const queue = new WorkQueue(log);
-  const changed = new Map<string, Notice | undefined>();
+  const changed = new Map<string, { page?: Page; notice?: Notice }>();
   let startupQueued = false;
+  let scanQueued = false;
   let announced = false;
   let client = createDiscord();
   const stopping = Promise.withResolvers<number | undefined>();
@@ -53,22 +57,24 @@ export async function runPublication(
     once: true,
   });
 
-  function markChanged(id: string, notice?: Notice) {
-    changed.set(id, notice);
+  function markChanged(id: string, page?: Page, notice?: Notice) {
+    changed.set(id, { page, notice });
     queue.enqueue(
       "site",
       notice ? priority.output : priority.batch,
       async () => {
-        const writtenAssets = new Set<string>();
-        for (const id of changed.keys()) {
-          const page = archive.get(id);
-          if (page?.published) await output.writePage(page, writtenAssets);
+        for (const [id, change] of changed) {
+          const thread = archive.get(id);
+          if (thread?.published)
+            await output.writePage(
+              change.page ?? (await renderArchivedThread(thread, config)),
+            );
           else await output.removePage(id);
         }
         await output.writeSite(await renderSite(archive.list(), config));
         log.info("Site updated", { pages: changed.size });
 
-        for (const notice of changed.values()) {
+        for (const { notice } of changed.values()) {
           if (notice) notify(notice.client, notice.text, notice.actor);
         }
         changed.clear();
@@ -77,24 +83,22 @@ export async function runPublication(
     );
   }
 
+  async function sendChannelNotification(source: Client, text: string) {
+    if (!config.LOG_CHANNEL_ID) return;
+    const channel = await source.channels.fetch(config.LOG_CHANNEL_ID);
+    if (!channel?.isSendable())
+      throw new Error("The notification channel does not accept messages");
+    await channel.send({ content: text, allowedMentions: { parse: [] } });
+  }
+
   function notify(source: Client, text: string, actor?: string) {
     const message = { content: text, allowedMentions: { parse: [] as [] } };
-    const channelId = config.LOG_CHANNEL_ID;
-    if (channelId) {
-      void source.channels
-        .fetch(channelId)
-        .then(async (channel) => {
-          if (!channel?.isSendable())
-            throw new Error(
-              "The notification channel does not accept messages",
-            );
-          await channel.send(message);
-        })
-        .catch((error: unknown) =>
-          log.warn("Could not send a notification to the Discord channel", {
-            error,
-          }),
-        );
+    if (config.LOG_CHANNEL_ID) {
+      void sendChannelNotification(source, text).catch((error: unknown) =>
+        log.warn("Could not send a notification to the Discord channel", {
+          error,
+        }),
+      );
     }
     if (actor) void source.users.send(actor, message).catch(() => {});
   }
@@ -123,12 +127,12 @@ export async function runPublication(
   async function saveThread(thread: ThreadChannel, actor?: string) {
     const messages = await fetchThreadMessages(thread);
     if (!messages.some((message) => message.id === thread.id)) {
-      log.info(
-        "The Discord starter message is missing. Kept the archived page",
-        {
-          threadId: thread.id,
-        },
-      );
+      const { status } = await inspectThread(thread, config);
+      if (status === "missing") restoreMissingThread(thread.id);
+      else
+        throw new Error(
+          `Discord returned an incomplete message history for thread ${thread.id}`,
+        );
       return false;
     }
 
@@ -141,30 +145,55 @@ export async function runPublication(
         messages,
         config,
         {
-          get: (path) => {
+          get: async (path) => {
             renderSignal.throwIfAborted();
-            return archive.hasAsset(path);
+            return output.hasAsset(path);
           },
-          add: (path, bytes) => {
+          add: async (path, bytes) => {
             renderSignal.throwIfAborted();
-            archive.storeAsset(path, bytes);
+            await output.writeAsset(path, bytes);
           },
         },
         (message) => isAnswerMessage(message, config, checked),
         renderSignal,
+        (snapshot) => {
+          renderSignal.throwIfAborted();
+          archive.save(snapshot);
+          log.info("Thread and messages saved to SQLite", {
+            threadId: thread.id,
+            messages: messages.length,
+            actor,
+          });
+        },
       );
       renderSignal.throwIfAborted();
-      archive.save(page);
+      markChanged(
+        thread.id,
+        page,
+        actor ? noticeFor(thread, actor, true) : undefined,
+      );
     } finally {
       rendering.abort();
     }
-    log.info("Page saved to SQLite", {
-      threadId: thread.id,
-      messages: messages.length,
-      actor,
-    });
-    markChanged(thread.id, actor ? noticeFor(thread, actor, true) : undefined);
     return true;
+  }
+
+  function restoreMissingThread(threadId: string) {
+    const thread = archive.get(threadId);
+    if (!thread) return;
+    archive.setSourceMissing(threadId, true);
+    if (thread.published) markChanged(threadId);
+    log.info(
+      "Discord source is missing. Restoring archived text without media",
+      { threadId },
+    );
+  }
+
+  async function refreshThread(threadId: string) {
+    if (!archive.get(threadId)?.published) return;
+    const thread = await fetchForumThread(client, config, threadId);
+    if (thread) await syncThread(thread);
+    else restoreMissingThread(threadId);
   }
 
   async function syncThread(
@@ -183,14 +212,24 @@ export async function runPublication(
       log.info("Page unpublished", { threadId, actor });
       markChanged(
         threadId,
+        undefined,
         actor ? noticeFor(thread, actor, false) : undefined,
       );
     } else if (status === "missing" && archive.hasPage(threadId)) {
-      log.info("The original post is missing. Kept the archived page", {
-        threadId,
-      });
+      restoreMissingThread(threadId);
     }
     return false;
+  }
+
+  function onSourceDeleted(threadId: string) {
+    queue.enqueue(
+      `deleted:${threadId}`,
+      priority.reaction,
+      async () => {
+        restoreMissingThread(threadId);
+      },
+      false,
+    );
   }
 
   function onReaction(event: ReactionEvent, removed: boolean) {
@@ -241,6 +280,16 @@ export async function runPublication(
 
   function onReady() {
     queue.setConnected(true);
+    if (!announced) {
+      queue.enqueue("startup-notice", priority.setup, async () => {
+        if (announced) return;
+        await sendChannelNotification(
+          client,
+          "vrcru-help-forum-generator перезагружен",
+        );
+        announced = true;
+      });
+    }
     queue.enqueue("forum", priority.setup, async () => {
       const forum = await client.channels.fetch(config.FORUM_CHANNEL_ID, {
         force: true,
@@ -254,22 +303,18 @@ export async function runPublication(
         );
       }
 
-      if (startup?.mode === "scan" && !startupQueued) {
-        await queueScan(forum);
-        startupQueued = true;
-      }
-
-      if (startup?.mode === "rebuild" && !startupQueued) {
-        startupQueued = true;
-        const target = startup.threadId;
+      if (!startupQueued) {
+        const target =
+          startup?.mode === "rebuild" ? startup.threadId : undefined;
         const threadIds = target
           ? [target]
           : archive.list().map(({ threadId }) => threadId);
-        log.info("Queued published pages for rebuilding", {
+        log.info("Queued archived threads for verification", {
           pages: threadIds.length,
           threadId: target,
         });
-        if (!target) notify(client, "Запущена перегенерация всех страниц.");
+        if (startup?.mode === "rebuild" && !target)
+          notify(client, "Запущена перегенерация всех страниц.");
         for (const threadId of threadIds) {
           queue.enqueue(`rebuild:${threadId}`, priority.backfill, async () => {
             if (!archive.get(threadId)?.published) {
@@ -279,22 +324,17 @@ export async function runPublication(
                 });
               return;
             }
-            const thread = await fetchForumThread(client, config, threadId);
-            if (thread) await syncThread(thread);
-            else
-              log.info(
-                "The Discord thread is missing. Restored the page from SQLite",
-                { threadId },
-              );
+            await refreshThread(threadId);
           });
         }
+        startupQueued = true;
+      }
+      if (startup?.mode === "scan" && !scanQueued) {
+        await queueScan(forum);
+        scanQueued = true;
       }
 
-      if (!announced) {
-        announced = true;
-        log.info("Ready to process forum reactions", { forumId: forum.id });
-        notify(client, "Создатель страниц для help.vrcru.org запущен.");
-      }
+      log.info("Ready to process forum reactions", { forumId: forum.id });
     });
   }
 
@@ -312,6 +352,33 @@ export async function runPublication(
         GatewayDispatchEvents.MessageReactionRemove,
         (data: GatewayMessageReactionRemoveDispatchData) =>
           onReaction(data, true),
+      );
+      client.ws.on(
+        GatewayDispatchEvents.ThreadDelete,
+        (data: GatewayThreadDeleteDispatchData) => {
+          if (
+            data.guild_id === config.GUILD_ID &&
+            data.parent_id === config.FORUM_CHANNEL_ID
+          )
+            onSourceDeleted(data.id);
+        },
+      );
+      client.ws.on(
+        GatewayDispatchEvents.MessageDelete,
+        (data: GatewayMessageDeleteDispatchData) => {
+          if (data.guild_id === config.GUILD_ID && data.id === data.channel_id)
+            onSourceDeleted(data.channel_id);
+        },
+      );
+      client.ws.on(
+        GatewayDispatchEvents.MessageDeleteBulk,
+        (data: GatewayMessageDeleteBulkDispatchData) => {
+          if (
+            data.guild_id === config.GUILD_ID &&
+            data.ids.includes(data.channel_id)
+          )
+            onSourceDeleted(data.channel_id);
+        },
       );
       let reconnecting = false;
       client.on(Events.ClientReady, () => {

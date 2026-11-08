@@ -1,8 +1,13 @@
 import { expect, test } from "bun:test";
 import type { Message, ThreadChannel } from "discord.js";
-import { renderSite, renderThread } from "../src/render.ts";
+import {
+  renderArchivedThread,
+  renderSite,
+  renderThread,
+} from "../src/render.ts";
+import type { ThreadSnapshot } from "../src/model.ts";
 
-test("renders answers and archives Discord media while escaping forum content", async () => {
+test("renders live media and captures a text snapshot before downloading assets", async () => {
   const fetchOriginal = globalThis.fetch;
   const downloads: string[] = [];
   globalThis.fetch = Object.assign(
@@ -73,6 +78,9 @@ test("renders answers and archives Discord media while escaping forum content", 
         ]),
         embeds: [
           {
+            title: "Embedded guide",
+            description: "Text from the guide",
+            fields: [{ name: "Step", value: "Read the instructions" }],
             thumbnail: {
               url: "https://example.com/preview.jpg",
               proxyURL:
@@ -118,6 +126,14 @@ test("renders answers and archives Discord media while escaping forum content", 
         },
       },
       async (message) => message.id === "346",
+      undefined,
+      (snapshot) => {
+        expect(downloads).toEqual([]);
+        expect(snapshot.messages[0]?.content).toContain(":test:");
+        expect(snapshot.messages[0]?.content).not.toContain(
+          "https://example.com/image.jpg",
+        );
+      },
     );
 
     expect(page.html).toContain("<strong>жирным</strong>");
@@ -150,11 +166,114 @@ test("renders answers and archives Discord media while escaping forum content", 
       "cdn.discordapp.com",
       "images-ext-1.discordapp.net",
     ]);
+    const archived = JSON.stringify(page.snapshot);
+    expect(archived).not.toContain("attachments/");
+    expect(archived).not.toContain("preview.jpg");
+    expect(archived).not.toContain("booth-img-fix.js");
+    expect(page.snapshot.messages[1]?.content).toContain("Text from the guide");
+    expect(page.snapshot.messages[1]?.content).toContain(
+      "Read the instructions",
+    );
+    expect(page.snapshot.messages[1]?.replyTo).toBe("345");
+    expect(page.snapshot.messages[1]?.answer).toBe(true);
 
     const site = await renderSite([page], config);
     expect(site.index).toContain('href="threads/345/"');
     expect(site.sitemap).toContain("https://help.vrcru.org/help/threads/345/");
     expect(site.robots).toContain("https://help.vrcru.org/help/sitemap.xml");
+  } finally {
+    globalThis.fetch = fetchOriginal;
+  }
+});
+
+test("renders archived messages with the current layout and text only", async () => {
+  const snapshot: ThreadSnapshot = {
+    threadId: "345",
+    title: "Archived question",
+    createdAt: "2024-01-01T12:00:00.000Z",
+    excerpt: "A saved question",
+    tags: ["Guide <script>"],
+    messages: [
+      {
+        id: "345",
+        authorId: "123",
+        authorName: "Author <script>",
+        authorColor: "#abcdef",
+        createdAt: "2024-01-01T12:00:00.000Z",
+        content:
+          "Question **saved** @Member :wave: ![Inline alt](https://example.com/image.png) <a:wave:555>\n\n[Guide](https://example.com/guide) https://example.com/animation.gif\n\n| Heading |\n|---|\n| Cell |",
+        replyTo: null,
+        answer: false,
+        reactions: [{ name: ":wave:", count: 2 }],
+      },
+      {
+        id: "346",
+        authorId: "123",
+        authorName: "Author <script>",
+        authorColor: "#abcdef",
+        createdAt: "2024-01-01T12:01:00.000Z",
+        content: "A reply with `code`",
+        replyTo: "345",
+        answer: true,
+        reactions: [],
+      },
+    ],
+  };
+  const fetchOriginal = globalThis.fetch;
+  globalThis.fetch = Object.assign(
+    async () => {
+      throw new Error("Archived rendering must not request remote resources");
+    },
+    { preconnect: fetchOriginal.preconnect },
+  );
+  try {
+    const config = {
+      BASE_URL: "https://help.vrcru.org/",
+      GUILD_ID: "234",
+      PUBLISH_EMOJI: "🌐",
+      ANSWER_EMOJI: "✅",
+      SITE_TITLE: "База знаний VRChatRU",
+      SITE_DESCRIPTION: "Описание",
+    };
+    const page = await renderArchivedThread(snapshot, config);
+    expect(page.html).toContain("<strong>saved</strong>");
+    expect(page.html).toContain("<table>");
+    expect(page.html).toContain("Inline alt");
+    expect(page.html).toContain("Author &lt;script&gt;");
+    expect(page.html).toContain('href="https://example.com/guide"');
+    expect(page.html).toContain('href="https://example.com/animation.gif"');
+    expect(page.html).toContain('href="#m-346">Ответ 1');
+    expect(page.html).toContain('href="#m-345"');
+    expect(page.html).toContain('data-answer="true"');
+    expect(page.html).toContain('<span class="emoji">:wave:</span><em>2</em>');
+    expect(page.html.match(/<article class="group">/g)).toHaveLength(1);
+    expect(page.html).not.toMatch(/<(?:video|audio|source|iframe)\b/);
+    let messageImages = 0;
+    new HTMLRewriter()
+      .on(".group img", {
+        element() {
+          messageImages++;
+        },
+      })
+      .transform(page.html);
+    expect(messageImages).toBe(0);
+    expect(page.html).toContain('alt="VRChatRU logo"');
+    expect(page.html).not.toContain("https://example.com/image.png");
+    expect(page.html).not.toContain("cdn.discordapp.com");
+    expect(page.html).not.toContain("og:image");
+    expect(page.assetPaths).toEqual([]);
+    const legacyPage = await renderArchivedThread(
+      {
+        ...snapshot,
+        messages: snapshot.messages.map((message, index) => ({
+          ...message,
+          authorId: "",
+          authorName: `Legacy author ${index}`,
+        })),
+      },
+      config,
+    );
+    expect(legacyPage.html.match(/<article class="group">/g)).toHaveLength(2);
   } finally {
     globalThis.fetch = fetchOriginal;
   }

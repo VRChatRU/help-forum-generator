@@ -122,7 +122,7 @@ type Mention = (syntax: string) => string;
 export async function renderMarkdown(
   source: string,
   threadId: string,
-  assets: ThreadAssets,
+  assets: ThreadAssets | null,
   mention: Mention,
   proxyBySource: ReadonlyMap<string, string>,
 ): Promise<{ html: string; images: string[] }> {
@@ -135,6 +135,7 @@ export async function renderMarkdown(
   const images: Array<string | undefined> = [];
 
   async function renderImage(href: string, alt: string, link: boolean) {
+    if (!assets) return escape(alt);
     const index = images.push(undefined) - 1;
     const media = await archiveImage(
       href,
@@ -155,13 +156,15 @@ export async function renderMarkdown(
       (match) => {
         const [encoded, animated, name, emojiId] = match;
         if (emojiId && name) {
-          return customEmoji(
-            emojiId,
-            `:${name}:`,
-            Boolean(animated),
-            assets,
-            "inline-emoji",
-          );
+          return assets
+            ? customEmoji(
+                emojiId,
+                `:${name}:`,
+                Boolean(animated),
+                assets,
+                "inline-emoji",
+              )
+            : escape(`:${name}:`);
         }
         const value = decodeHtml(encoded).slice(1, -1);
         if (!link || !/^https?:\/\//i.test(value)) return mention(value);
@@ -182,7 +185,7 @@ export async function renderMarkdown(
         if (href !== undefined && body !== undefined) {
           const value = decodeHtml(href);
           const url = webUrl(value);
-          if (url && body === href && /\.gif$/i.test(url.pathname)) {
+          if (assets && url && body === href && /\.gif$/i.test(url.pathname)) {
             return renderImage(url.href, "", true);
           }
           const label = await renderFragment(body, false);
@@ -203,4 +206,15 @@ export async function renderMarkdown(
     html: await renderFragment(html),
     images: images.filter((url): url is string => url !== undefined),
   };
+}
+
+export async function renderTextMarkdown(source: string): Promise<string> {
+  const rendered = await renderMarkdown(
+    source,
+    "",
+    null,
+    (syntax) => escape(`<${syntax}>`),
+    new Map(),
+  );
+  return rendered.html;
 }
