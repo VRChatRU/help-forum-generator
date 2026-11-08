@@ -119,6 +119,84 @@ export async function archiveImage(
 
 type Mention = (syntax: string) => string;
 
+function normalizeCodeBlocks(source: string): string {
+  source = source.replace(/\r\n?/g, "\n");
+  const parts: string[] = [];
+  const runs = /`+|~{3,}/g;
+  let offset = 0;
+  let fence: { marker: string; length: number; prefix: string } | undefined;
+
+  for (let match = runs.exec(source); match; match = runs.exec(source)) {
+    const start = match.index;
+    const end = runs.lastIndex;
+    const run = match[0];
+    const marker = run[0]!;
+    const lineStart = source.lastIndexOf("\n", start - 1) + 1;
+    const lineEnd = source.indexOf("\n", end);
+    const prefix = source.slice(lineStart, start);
+    const suffix = source.slice(end, lineEnd < 0 ? source.length : lineEnd);
+    const container =
+      /^(?:[ \t]{0,3}>[ \t]?)*[ \t]*(?:(?:[-+*]|\d{1,9}[.)])[ \t]+)?/.exec(
+        prefix,
+      )![0];
+    const atLineStart = container === prefix;
+    const continuation = container.replace(
+      /(?:[-+*]|\d{1,9}[.)])[ \t]+$/,
+      (marker) => " ".repeat(marker.length),
+    );
+
+    if (fence) {
+      if (marker !== fence.marker || run.length < fence.length) continue;
+      if (marker === "~" || fence.length > 3) {
+        if (atLineStart && /^[ \t]*$/.test(suffix)) fence = undefined;
+        continue;
+      }
+      parts.push(
+        source.slice(offset, start),
+        atLineStart ? "" : "\n" + fence.prefix,
+        run,
+      );
+      if (!/^[ \t]*$/.test(suffix)) parts.push("\n" + fence.prefix);
+      offset = end;
+      fence = undefined;
+      continue;
+    }
+
+    let slashes = 0;
+    for (let index = start - 1; source[index] === "\\"; index--) slashes++;
+    if (slashes % 2) continue;
+
+    if (marker === "~") {
+      if (atLineStart)
+        fence = { marker, length: run.length, prefix: continuation };
+      continue;
+    }
+    if (run.length < 3) {
+      // Inline code can contain triple backticks as literal text.
+      const closing = new RegExp("(?<!`)" + run + "(?!`)", "g");
+      closing.lastIndex = end;
+      const next = closing.exec(source);
+      if (next && !/\n[ \t]*\n/.test(source.slice(end, next.index)))
+        runs.lastIndex = next.index + next[0].length;
+      continue;
+    }
+
+    // Discord accepts inline fences; Bun requires delimiters on their own lines.
+    parts.push(
+      source.slice(offset, start),
+      atLineStart ? "" : "\n" + continuation,
+      run,
+    );
+    const info = suffix.trim();
+    if (info && !/^[a-z0-9_][a-z0-9_+.#/-]*$/i.test(info))
+      parts.push("\n" + continuation);
+    offset = end;
+    fence = { marker, length: run.length, prefix: continuation };
+  }
+  parts.push(source.slice(offset));
+  return parts.join("");
+}
+
 export async function renderMarkdown(
   source: string,
   threadId: string,
@@ -126,7 +204,7 @@ export async function renderMarkdown(
   mention: Mention,
   proxyBySource: ReadonlyMap<string, string>,
 ): Promise<{ html: string; images: string[] }> {
-  const html = Bun.markdown.html(source, {
+  const html = Bun.markdown.html(normalizeCodeBlocks(source), {
     noHtmlBlocks: true,
     noHtmlSpans: true,
     autolinks: { url: true, www: true },
